@@ -1,12 +1,19 @@
 package tableList;
+
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Frame;
+import java.awt.event.ItemEvent;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
-import java.util.Random;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 
@@ -17,27 +24,30 @@ import javax.swing.JComboBox;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
-import javax.swing.JTable;
+import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SpinnerNumberModel;
+import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.border.EmptyBorder;
-import javax.swing.table.AbstractTableModel;
-import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.border.TitledBorder;
 
-// FlatLaf Imports
-import com.formdev.flatlaf.FlatLightLaf; // Or FlatDarkLaf, FlatIntelliJLaf, etc.
+import com.formdev.flatlaf.FlatLightLaf;
 
-// MigLayout Imports
+// Imports for GTable and its components
+import lyfjshs.gomis.components.table.DefaultTableActionManager;
+import lyfjshs.gomis.components.table.GTable;
 import net.miginfocom.swing.MigLayout;
+
 
 /**
  * Student POJO Class
- * Represents a student with relevant information.
+ * Represents a student with their details.
  */
 class Student {
     private String lrn;
@@ -45,13 +55,11 @@ class Student {
     private String firstName;
     private String middleName;
     private String sex;
-    // private LocalDate birthDate; // Not directly used if age is provided
-    private int age; // Directly from STUDENT_AGE if available
+    private int age;
     private String gradeLevel;
     private String section;
     private String trackAndStrand;
 
-    // Constructor
     public Student(String lrn, String lastName, String firstName, String middleName,
                    String sex, int age, String gradeLevel, String section, String trackAndStrand) {
         this.lrn = lrn;
@@ -76,16 +84,32 @@ class Student {
     public String getSection() { return section; }
     public String getTrackAndStrand() { return trackAndStrand; }
 
+    /**
+     * Gets the full name of the student (LastName, FirstName M.).
+     * @return The full name.
+     */
     public String getFullName() {
         return lastName + ", " + firstName + " " + (middleName != null && !middleName.isEmpty() ? middleName.charAt(0) + "." : "");
     }
+
+     /**
+     * Gets the full name of the student in format: FirstName MiddleInitial. LastName.
+     * @return The formatted full name.
+     */
+    public String getFormattedName() {
+        StringJoiner sj = new StringJoiner(" ");
+        if (firstName != null && !firstName.isEmpty()) sj.add(firstName);
+        if (middleName != null && !middleName.isEmpty()) sj.add(middleName.charAt(0) + ".");
+        if (lastName != null && !lastName.isEmpty()) sj.add(lastName);
+        return sj.toString();
+    }
+
 
     @Override
     public String toString() {
         return "Student{" +
                "lrn='" + lrn + '\'' +
-               ", lastName='" + lastName + '\'' +
-               ", firstName='" + firstName + '\'' +
+               ", fullName='" + getFullName() + '\'' +
                ", age=" + age +
                ", gradeLevel='" + gradeLevel + '\'' +
                '}';
@@ -93,16 +117,17 @@ class Student {
 }
 
 /**
- * Filter Class
- * Encapsulates all filter criteria.
+ * FilterCriteria Class
+ * Holds the criteria for filtering student data.
  */
 class FilterCriteria {
-    String searchNameTerm = "";
+    String searchTerm = ""; // General search for LRN or parts of name
     String filterFirstName = "";
     String filterLastName = "";
     String filterMiddleName = "";
     boolean middleInitialOnly = false;
     String filterGradeLevel = "All";
+    String filterSection = "All"; // Added section filter
     String filterTrackStrand = "All";
     boolean filterMale = true;
     boolean filterFemale = true;
@@ -111,456 +136,466 @@ class FilterCriteria {
 
     public FilterCriteria() {}
 
-    // getAppliedFilterCount is now more accurately handled in StudentApp.updateAppliedFiltersLabel()
-    // as it needs access to dbManager.getMinMaxAge() for accurate age filter counting.
-
-    public void reset(int dbMinAge, int dbMaxAge) { // Pass DB min/max for accurate age reset
-        searchNameTerm = "";
+    /**
+     * Resets all filter criteria to their default values.
+     * @param dbMinAge The minimum age found in the database (for default setting).
+     * @param dbMaxAge The maximum age found in the database (for default setting).
+     */
+    public void reset(int dbMinAge, int dbMaxAge) {
+        searchTerm = "";
         filterFirstName = "";
         filterLastName = "";
         filterMiddleName = "";
         middleInitialOnly = false;
         filterGradeLevel = "All";
+        filterSection = "All";
         filterTrackStrand = "All";
         filterMale = true;
         filterFemale = true;
         minAge = dbMinAge;
-        maxAge = dbMaxAge + 5;
+        maxAge = dbMaxAge > dbMinAge ? dbMaxAge + 5 : dbMinAge + 20; // Default max age with a small buffer
+    }
+
+    /**
+     * Checks if any specific filters (beyond search term and default age/sex) are active.
+     * @param dbMinAge Minimum age from DB for default comparison.
+     * @param dbMaxAge Maximum age from DB for default comparison.
+     * @return True if specific filters are active, false otherwise.
+     */
+    public boolean hasActiveSpecificFilters(int dbMinAge, int dbMaxAge) {
+        if (filterFirstName != null && !filterFirstName.isEmpty()) return true;
+        if (filterLastName != null && !filterLastName.isEmpty()) return true;
+        if (filterMiddleName != null && !filterMiddleName.isEmpty()) return true;
+        if (!"All".equals(filterGradeLevel)) return true;
+        if (!"All".equals(filterSection)) return true;
+        if (!"All".equals(filterTrackStrand)) return true;
+        // Check if sex filter is non-default (i.e., not both true)
+        if (!filterMale || !filterFemale) {
+            if (filterMale != filterFemale) return true; // Only one is selected
+            if (!filterMale && !filterFemale) return true; // None selected (effectively filtering all out)
+        }
+        // Check if age is different from default range
+        int defaultMaxAge = dbMaxAge > dbMinAge ? dbMaxAge + 5 : dbMinAge + 20;
+        if (minAge != dbMinAge || maxAge != defaultMaxAge) return true;
+
+        return false;
+    }
+
+    /**
+     * Counts the number of active filters.
+     * @param dbMinAge Minimum age from DB for default comparison.
+     * @param dbMaxAge Maximum age from DB for default comparison.
+     * @return The count of active filters.
+     */
+    public int getActiveFilterCount(int dbMinAge, int dbMaxAge) {
+        int count = 0;
+        if (searchTerm != null && !searchTerm.isEmpty()) count++;
+        if (filterFirstName != null && !filterFirstName.isEmpty()) count++;
+        if (filterLastName != null && !filterLastName.isEmpty()) count++;
+        if (filterMiddleName != null && !filterMiddleName.isEmpty()) count++;
+        if (!"All".equals(filterGradeLevel)) count++;
+        if (!"All".equals(filterSection)) count++;
+        if (!"All".equals(filterTrackStrand)) count++;
+        if (!filterMale || !filterFemale) { // If not both are true (default)
+             if (filterMale != filterFemale) count++; // Only one selected counts as a filter
+             else if (!filterMale && !filterFemale) count++; // Neither selected also counts
+        }
+        int defaultMaxAge = dbMaxAge > dbMinAge ? dbMaxAge + 5 : dbMinAge + 20;
+        if (minAge != dbMinAge || maxAge != defaultMaxAge) {
+            count++;
+        }
+        return count;
     }
 }
 
 /**
- * StudentTableModel Class
- * Custom TableModel for displaying student data.
- */
-class StudentTableModel extends AbstractTableModel {
-    private final List<Student> students;
-    private final String[] columnNames = {"LRN", "Last Name", "First Name", "Middle Name", "Sex", "Age", "Grade Level", "Section", "Track & Strand"};
-
-    public StudentTableModel(List<Student> students) {
-        this.students = students != null ? new ArrayList<>(students) : new ArrayList<>();
-    }
-
-    public void setData(List<Student> newStudents) {
-        this.students.clear();
-        if (newStudents != null) {
-            this.students.addAll(newStudents);
-        }
-        fireTableDataChanged();
-    }
-
-    @Override
-    public int getRowCount() {
-        return students.size();
-    }
-
-    @Override
-    public int getColumnCount() {
-        return columnNames.length;
-    }
-
-    @Override
-    public Object getValueAt(int rowIndex, int columnIndex) {
-        Student student = students.get(rowIndex);
-        switch (columnIndex) {
-            case 0: return student.getLrn();
-            case 1: return student.getLastName();
-            case 2: return student.getFirstName();
-            case 3: return student.getMiddleName();
-            case 4: return student.getSex();
-            case 5: return student.getAge();
-            case 6: return student.getGradeLevel();
-            case 7: return student.getSection();
-            case 8: return student.getTrackAndStrand();
-            default: return null;
-        }
-    }
-
-    @Override
-    public String getColumnName(int column) {
-        return columnNames[column];
-    }
-}
-
-/**
- * Simulated DatabaseManager Class
- * Manages student data, including filtering and pagination.
+ * DatabaseManager Class
+ * Handles database operations for fetching student data.
  */
 class DatabaseManager {
-    private final List<Student> allStudents = new ArrayList<>();
-    private static final Random random = new Random();
 
     public DatabaseManager() {
-        generateDummyStudents(4000);
     }
 
-    private void generateDummyStudents(int count) {
-        String[] firstNamesMale = {"James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph", "Charles", "Thomas"};
-        String[] firstNamesFemale = {"Mary", "Patricia", "Jennifer", "Linda", "Elizabeth", "Susan", "Jessica", "Sarah", "Karen", "Nancy"};
-        String[] lastNames = {"Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Lee", "Walker", "Hall", "Allen", "King"};
-        String[] middleInitials = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", ""};
-        String[] sexes = {"Male", "Female"};
-        String[] gradeLevels = {"Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11", "Grade 12"};
-        String[] sections = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"};
-        String[] tracks = {"Academic", "TVL", "Sports", "Arts and Design"};
-        String[] strandsAcademic = {"ABM", "STEM", "HUMSS", "GAS"};
-        String[] strandsTVL = {"ICT", "HE", "IA", "Agri-Fishery"};
-
-        for (int i = 0; i < count; i++) {
-            String sex = sexes[random.nextInt(sexes.length)];
-            String firstName = sex.equals("Male") ? firstNamesMale[random.nextInt(firstNamesMale.length)] : firstNamesFemale[random.nextInt(firstNamesFemale.length)];
-            String lastNameVal = lastNames[random.nextInt(lastNames.length)];
-            String currentMiddleNameInitial = middleInitials[random.nextInt(middleInitials.length)]; // Renamed for clarity
-            String fullMiddleName = currentMiddleNameInitial; // Start with the initial
-
-            if (!currentMiddleNameInitial.isEmpty() && random.nextBoolean()) { // 50% chance of having a full middle name if initial is present
-                String lastNameForMiddlePart = lastNames[random.nextInt(lastNames.length)];
-                int lengthForMiddlePart = lastNameForMiddlePart.length();
-                // Ensure substring length is valid for lastNameForMiddlePart
-                int charsToTake = Math.min(3 + random.nextInt(4), lengthForMiddlePart);
-                if (lengthForMiddlePart > 0 && charsToTake > 0) { // Add part only if there's something to take
-                     fullMiddleName = currentMiddleNameInitial + lastNameForMiddlePart.substring(0, charsToTake).toLowerCase();
-                }
-            }
-
-            String lrn = String.format("%012d", Math.abs(random.nextLong() % 1000000000000L));
-            int age = 12 + random.nextInt(10); // Ages 12-21
-            String gradeLevel = gradeLevels[random.nextInt(gradeLevels.length)];
-            String section = sections[random.nextInt(sections.length)];
-            String track = "";
-            String strand = "";
-            if (gradeLevel.contains(" ")) { // Basic check to avoid error if gradeLevel format changes
-                try {
-                    if (Integer.parseInt(gradeLevel.split(" ")[1]) >= 11) { // SHS
-                        track = tracks[random.nextInt(tracks.length)];
-                        if (track.equals("Academic")) {
-                            strand = strandsAcademic[random.nextInt(strandsAcademic.length)];
-                        } else if (track.equals("TVL")) {
-                            strand = strandsTVL[random.nextInt(strandsTVL.length)];
-                        }
-                    }
-                } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
-                    // Handle potential errors if gradeLevel string is not as expected
-                    // For example, log this or assign a default track/strand
-                    System.err.println("Warning: Could not parse grade level for track/strand: " + gradeLevel);
-                }
-            }
-            String trackAndStrand = track.isEmpty() ? "N/A" : (track + (strand.isEmpty() ? "" : " - " + strand));
-
-            allStudents.add(new Student(lrn, lastNameVal, firstName, fullMiddleName, sex, age, gradeLevel, section, trackAndStrand));
-        }
-    }
-
+    /**
+     * Fetches a list of students from the database based on filter criteria.
+     *
+     * @param page       The current page number (1-indexed). Ignored if pageSize is MAX_VALUE.
+     * @param pageSize   The number of students per page. If Integer.MAX_VALUE, fetches all.
+     * @param criteria   The filter criteria to apply.
+     * @return A list of Student objects.
+     */
     public List<Student> getStudents(int page, int pageSize, FilterCriteria criteria) {
-        List<Student> filteredStudents = allStudents.stream()
-            .filter(s -> {
-                boolean match = true;
-                if (criteria.searchNameTerm != null && !criteria.searchNameTerm.isEmpty()) {
-                    String searchTermLower = criteria.searchNameTerm.toLowerCase();
-                    match = s.getFirstName().toLowerCase().contains(searchTermLower) ||
-                            s.getLastName().toLowerCase().contains(searchTermLower) ||
-                            s.getMiddleName().toLowerCase().contains(searchTermLower);
-                }
-                if (!match) return false;
+        List<Student> students = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+        StringBuilder sqlBuilder = new StringBuilder(
+            "SELECT s.STUDENT_LRN, s.STUDENT_LASTNAME, s.STUDENT_FIRSTNAME, s.STUDENT_MIDDLENAME, " +
+            "s.STUDENT_SEX, s.STUDENT_AGE, sf.SF_GRADE_LEVEL, sf.SF_SECTION, sf.SF_TRACK_AND_STRAND " +
+            "FROM STUDENT s JOIN SCHOOL_FORM sf ON s.SF_ID = sf.SF_ID"
+        );
+        StringBuilder whereClause = new StringBuilder();
 
-                if (criteria.filterFirstName != null && !criteria.filterFirstName.isEmpty()) {
-                    match = s.getFirstName().toLowerCase().contains(criteria.filterFirstName.toLowerCase());
-                }
-                if (!match) return false;
-
-                if (criteria.filterLastName != null && !criteria.filterLastName.isEmpty()) {
-                    match = s.getLastName().toLowerCase().contains(criteria.filterLastName.toLowerCase());
-                }
-                if (!match) return false;
-
-                if (criteria.filterMiddleName != null && !criteria.filterMiddleName.isEmpty()) {
-                    String middleNameLower = s.getMiddleName().toLowerCase();
-                    String filterMiddleLower = criteria.filterMiddleName.toLowerCase();
-                    if (criteria.middleInitialOnly) {
-                        if (middleNameLower.isEmpty() || filterMiddleLower.isEmpty()) match = middleNameLower.isEmpty() && filterMiddleLower.isEmpty();
-                        else match = middleNameLower.startsWith(String.valueOf(filterMiddleLower.charAt(0)));
-                    } else {
-                        match = middleNameLower.contains(filterMiddleLower);
-                    }
-                }
-                if (!match) return false;
-
-                if (!"All".equals(criteria.filterGradeLevel)) {
-                    match = s.getGradeLevel().equals(criteria.filterGradeLevel);
-                }
-                if (!match) return false;
-
-                if (!"All".equals(criteria.filterTrackStrand)) {
-                    match = s.getTrackAndStrand().equals(criteria.filterTrackStrand);
-                }
-                if (!match) return false;
-
-                boolean maleSelected = criteria.filterMale;
-                boolean femaleSelected = criteria.filterFemale;
-                if (maleSelected && !femaleSelected) {
-                    match = "Male".equalsIgnoreCase(s.getSex());
-                } else if (!maleSelected && femaleSelected) {
-                    match = "Female".equalsIgnoreCase(s.getSex());
-                } else if (!maleSelected && !femaleSelected) {
-                    match = false;
-                }
-                if (!match) return false;
-
-                match = s.getAge() >= criteria.minAge && s.getAge() <= criteria.maxAge;
-                return match;
-            })
-            .sorted(Comparator.comparing(Student::getLastName).thenComparing(Student::getFirstName))
-            .collect(Collectors.toList());
-
-        int fromIndex = (page - 1) * pageSize;
-        int toIndex = Math.min(fromIndex + pageSize, filteredStudents.size());
-
-        if (fromIndex >= filteredStudents.size() || fromIndex < 0) {
-            return new ArrayList<>();
+        // General Search Term (LRN or Name parts)
+        if (criteria.searchTerm != null && !criteria.searchTerm.isEmpty()) {
+            addCondition(whereClause,
+                "(s.STUDENT_LRN LIKE ? OR " +
+                "LOWER(s.STUDENT_FIRSTNAME) LIKE ? OR " +
+                "LOWER(s.STUDENT_LASTNAME) LIKE ? OR " +
+                "LOWER(s.STUDENT_MIDDLENAME) LIKE ? OR " +
+                "LOWER(CONCAT(s.STUDENT_FIRSTNAME, ' ', s.STUDENT_LASTNAME)) LIKE ? OR " +
+                "LOWER(CONCAT(s.STUDENT_LASTNAME, ', ', s.STUDENT_FIRSTNAME)) LIKE ?)"
+            );
+            String searchTermParam = "%" + criteria.searchTerm.toLowerCase() + "%";
+            for(int i=0; i<6; i++) params.add(searchTermParam);
         }
-        return filteredStudents.subList(fromIndex, toIndex);
+
+        // Detailed Name Filters (if search term is not primarily used for names)
+        if (criteria.filterFirstName != null && !criteria.filterFirstName.isEmpty()) {
+            addCondition(whereClause, "LOWER(s.STUDENT_FIRSTNAME) LIKE ?");
+            params.add("%" + criteria.filterFirstName.toLowerCase() + "%");
+        }
+        if (criteria.filterLastName != null && !criteria.filterLastName.isEmpty()) {
+            addCondition(whereClause, "LOWER(s.STUDENT_LASTNAME) LIKE ?");
+            params.add("%" + criteria.filterLastName.toLowerCase() + "%");
+        }
+        if (criteria.filterMiddleName != null && !criteria.filterMiddleName.isEmpty()) {
+            if (criteria.middleInitialOnly) {
+                addCondition(whereClause, "LOWER(s.STUDENT_MIDDLENAME) LIKE ?");
+                params.add(criteria.filterMiddleName.toLowerCase().charAt(0) + "%");
+            } else {
+                addCondition(whereClause, "LOWER(s.STUDENT_MIDDLENAME) LIKE ?");
+                params.add("%" + criteria.filterMiddleName.toLowerCase() + "%");
+            }
+        }
+        // Grade Level Filter
+        if (!"All".equals(criteria.filterGradeLevel)) {
+            addCondition(whereClause, "sf.SF_GRADE_LEVEL = ?");
+            params.add(criteria.filterGradeLevel);
+        }
+        // Section Filter
+        if (!"All".equals(criteria.filterSection)) {
+            addCondition(whereClause, "sf.SF_SECTION = ?");
+            params.add(criteria.filterSection);
+        }
+        // Track & Strand Filter
+        if (!"All".equals(criteria.filterTrackStrand)) {
+            addCondition(whereClause, "sf.SF_TRACK_AND_STRAND = ?");
+            params.add(criteria.filterTrackStrand);
+        }
+        // Sex Filter
+        if (!criteria.filterMale && criteria.filterFemale) {
+            addCondition(whereClause, "s.STUDENT_SEX = ?"); params.add("Female");
+        } else if (criteria.filterMale && !criteria.filterFemale) {
+            addCondition(whereClause, "s.STUDENT_SEX = ?"); params.add("Male");
+        } else if (!criteria.filterMale && !criteria.filterFemale) { // Neither selected
+            addCondition(whereClause, "1 = 0"); // Effectively returns no results for sex
+        }
+        // Age Range Filter
+        addCondition(whereClause, "s.STUDENT_AGE BETWEEN ? AND ?");
+        params.add(criteria.minAge); params.add(criteria.maxAge);
+
+        if (whereClause.length() > 0) {
+            sqlBuilder.append(" WHERE ").append(whereClause);
+        }
+
+        sqlBuilder.append(" ORDER BY s.STUDENT_LASTNAME ASC, s.STUDENT_FIRSTNAME ASC");
+
+        if (pageSize != Integer.MAX_VALUE) { // Apply pagination only if not fetching all
+            sqlBuilder.append(" LIMIT ? OFFSET ?");
+            params.add(pageSize);
+            params.add((page - 1) * pageSize);
+        }
+
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sqlBuilder.toString())) {
+            for (int i = 0; i < params.size(); i++) {
+                pstmt.setObject(i + 1, params.get(i));
+            }
+            // System.out.println("Executing SQL: " + pstmt.toString()); // For debugging
+            try (ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    students.add(new Student(
+                        rs.getString("STUDENT_LRN"), rs.getString("STUDENT_LASTNAME"),
+                        rs.getString("STUDENT_FIRSTNAME"), rs.getString("STUDENT_MIDDLENAME"),
+                        rs.getString("STUDENT_SEX"), rs.getInt("STUDENT_AGE"),
+                        rs.getString("SF_GRADE_LEVEL"), rs.getString("SF_SECTION"),
+                        rs.getString("SF_TRACK_AND_STRAND")
+                    ));
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            JOptionPane.showMessageDialog(null, "Error fetching student data: " + e.getMessage(), "Database Error", JOptionPane.ERROR_MESSAGE);
+        }
+        return students;
     }
 
+    /**
+     * Counts the total number of students matching the filter criteria.
+     * @param criteria The filter criteria.
+     * @return The total count of matching students.
+     */
     public int getTotalStudentCount(FilterCriteria criteria) {
-        return (int) allStudents.stream()
-            .filter(s -> {
-                boolean match = true;
-                if (criteria.searchNameTerm != null && !criteria.searchNameTerm.isEmpty()) {
-                    String searchTermLower = criteria.searchNameTerm.toLowerCase();
-                    match = s.getFirstName().toLowerCase().contains(searchTermLower) ||
-                            s.getLastName().toLowerCase().contains(searchTermLower) ||
-                            s.getMiddleName().toLowerCase().contains(searchTermLower);
-                }
-                if (!match) return false;
+        List<Object> params = new ArrayList<>();
+        StringBuilder sqlBuilder = new StringBuilder("SELECT COUNT(DISTINCT s.STUDENT_LRN) FROM STUDENT s JOIN SCHOOL_FORM sf ON s.SF_ID = sf.SF_ID");
+        StringBuilder whereClause = new StringBuilder();
 
-                if (criteria.filterFirstName != null && !criteria.filterFirstName.isEmpty()) {
-                    match = s.getFirstName().toLowerCase().contains(criteria.filterFirstName.toLowerCase());
-                }
-                if (!match) return false;
+        // Apply the same filtering logic as in getStudents()
+        if (criteria.searchTerm != null && !criteria.searchTerm.isEmpty()) {
+             addCondition(whereClause,
+                "(s.STUDENT_LRN LIKE ? OR " +
+                "LOWER(s.STUDENT_FIRSTNAME) LIKE ? OR " +
+                "LOWER(s.STUDENT_LASTNAME) LIKE ? OR " +
+                "LOWER(s.STUDENT_MIDDLENAME) LIKE ? OR " +
+                "LOWER(CONCAT(s.STUDENT_FIRSTNAME, ' ', s.STUDENT_LASTNAME)) LIKE ? OR " +
+                "LOWER(CONCAT(s.STUDENT_LASTNAME, ', ', s.STUDENT_FIRSTNAME)) LIKE ?)"
+            );
+            String searchTermParam = "%" + criteria.searchTerm.toLowerCase() + "%";
+            for(int i=0; i<6; i++) params.add(searchTermParam);
+        }
+        if (criteria.filterFirstName != null && !criteria.filterFirstName.isEmpty()) {
+            addCondition(whereClause, "LOWER(s.STUDENT_FIRSTNAME) LIKE ?");
+            params.add("%" + criteria.filterFirstName.toLowerCase() + "%");
+        }
+        if (criteria.filterLastName != null && !criteria.filterLastName.isEmpty()) {
+            addCondition(whereClause, "LOWER(s.STUDENT_LASTNAME) LIKE ?");
+            params.add("%" + criteria.filterLastName.toLowerCase() + "%");
+        }
+        if (criteria.filterMiddleName != null && !criteria.filterMiddleName.isEmpty()) {
+            if (criteria.middleInitialOnly) {
+                addCondition(whereClause, "LOWER(s.STUDENT_MIDDLENAME) LIKE ?");
+                params.add(criteria.filterMiddleName.toLowerCase().charAt(0) + "%");
+            } else {
+                addCondition(whereClause, "LOWER(s.STUDENT_MIDDLENAME) LIKE ?");
+                params.add("%" + criteria.filterMiddleName.toLowerCase() + "%");
+            }
+        }
+        if (!"All".equals(criteria.filterGradeLevel)) {
+            addCondition(whereClause, "sf.SF_GRADE_LEVEL = ?");
+            params.add(criteria.filterGradeLevel);
+        }
+        if (!"All".equals(criteria.filterSection)) {
+            addCondition(whereClause, "sf.SF_SECTION = ?");
+            params.add(criteria.filterSection);
+        }
+        if (!"All".equals(criteria.filterTrackStrand)) {
+            addCondition(whereClause, "sf.SF_TRACK_AND_STRAND = ?");
+            params.add(criteria.filterTrackStrand);
+        }
+        if (!criteria.filterMale && criteria.filterFemale) {
+            addCondition(whereClause, "s.STUDENT_SEX = ?"); params.add("Female");
+        } else if (criteria.filterMale && !criteria.filterFemale) {
+            addCondition(whereClause, "s.STUDENT_SEX = ?"); params.add("Male");
+        } else if (!criteria.filterMale && !criteria.filterFemale) {
+            addCondition(whereClause, "1 = 0");
+        }
+        addCondition(whereClause, "s.STUDENT_AGE BETWEEN ? AND ?");
+        params.add(criteria.minAge);
+        params.add(criteria.maxAge);
 
-                if (criteria.filterLastName != null && !criteria.filterLastName.isEmpty()) {
-                    match = s.getLastName().toLowerCase().contains(criteria.filterLastName.toLowerCase());
-                }
-                if (!match) return false;
 
-                if (criteria.filterMiddleName != null && !criteria.filterMiddleName.isEmpty()) {
-                    String middleNameLower = s.getMiddleName().toLowerCase();
-                    String filterMiddleLower = criteria.filterMiddleName.toLowerCase();
-                    if (criteria.middleInitialOnly) {
-                        if (middleNameLower.isEmpty() || filterMiddleLower.isEmpty()) match = middleNameLower.isEmpty() && filterMiddleLower.isEmpty();
-                        else match = middleNameLower.startsWith(String.valueOf(filterMiddleLower.charAt(0)));
-                    } else {
-                        match = middleNameLower.contains(filterMiddleLower);
-                    }
-                }
-                 if (!match) return false;
+        if (whereClause.length() > 0) {
+            sqlBuilder.append(" WHERE ").append(whereClause);
+        }
 
-                if (!"All".equals(criteria.filterGradeLevel)) {
-                    match = s.getGradeLevel().equals(criteria.filterGradeLevel);
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sqlBuilder.toString())) {
+            for (int i = 0; i < params.size(); i++) {
+                pstmt.setObject(i + 1, params.get(i));
+            }
+            // System.out.println("Executing Count SQL: " + pstmt.toString()); // For debugging
+            try (ResultSet rs = pstmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
                 }
-                 if (!match) return false;
-
-                if (!"All".equals(criteria.filterTrackStrand)) {
-                    match = s.getTrackAndStrand().equals(criteria.filterTrackStrand);
-                }
-                 if (!match) return false;
-
-                boolean maleSelected = criteria.filterMale;
-                boolean femaleSelected = criteria.filterFemale;
-                if (maleSelected && !femaleSelected) {
-                    match = "Male".equalsIgnoreCase(s.getSex());
-                } else if (!maleSelected && femaleSelected) {
-                    match = "Female".equalsIgnoreCase(s.getSex());
-                } else if (!maleSelected && !femaleSelected) {
-                    match = false;
-                }
-                 if (!match) return false;
-
-                match = s.getAge() >= criteria.minAge && s.getAge() <= criteria.maxAge;
-                return match;
-            })
-            .count();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            JOptionPane.showMessageDialog(null, "Error counting students: " + e.getMessage(), "Database Error", JOptionPane.ERROR_MESSAGE);
+        }
+        return 0;
     }
 
+
+    private void addCondition(StringBuilder whereClause, String condition) {
+        if (whereClause.length() > 0) {
+            whereClause.append(" AND ");
+        }
+        whereClause.append(condition);
+    }
+
+    // Methods to fetch distinct values for filter dropdowns
     public Set<String> getDistinctGradeLevels() {
-        return allStudents.stream()
-                          .map(Student::getGradeLevel)
-                          .filter(Objects::nonNull)
-                          .collect(Collectors.toCollection(TreeSet::new));
+        Set<String> gradeLevels = new TreeSet<>(); // Use TreeSet for natural sorting
+        String sql = "SELECT DISTINCT SF_GRADE_LEVEL FROM SCHOOL_FORM WHERE SF_GRADE_LEVEL IS NOT NULL AND SF_GRADE_LEVEL != '' ORDER BY SF_GRADE_LEVEL ASC";
+        try (Connection conn = DBConnection.getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) gradeLevels.add(rs.getString("SF_GRADE_LEVEL"));
+        } catch (SQLException e) { e.printStackTrace(); JOptionPane.showMessageDialog(null, "Error fetching grade levels: " + e.getMessage(), "Database Error", JOptionPane.ERROR_MESSAGE); }
+        return gradeLevels;
     }
+     public Set<String> getDistinctSections() {
+        Set<String> sections = new TreeSet<>();
+        String sql = "SELECT DISTINCT SF_SECTION FROM SCHOOL_FORM WHERE SF_SECTION IS NOT NULL AND SF_SECTION != '' ORDER BY SF_SECTION ASC";
+        try (Connection conn = DBConnection.getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) sections.add(rs.getString("SF_SECTION"));
+        } catch (SQLException e) { e.printStackTrace(); JOptionPane.showMessageDialog(null, "Error fetching sections: " + e.getMessage(), "Database Error", JOptionPane.ERROR_MESSAGE); }
+        return sections;
+    }
+
 
     public Set<String> getDistinctTrackStrands() {
-        return allStudents.stream()
-                          .map(Student::getTrackAndStrand)
-                          .filter(s -> Objects.nonNull(s) && !s.isEmpty() && !"N/A".equals(s)) // Exclude N/A from distinct options
-                          .collect(Collectors.toCollection(TreeSet::new));
+        Set<String> trackStrands = new TreeSet<>();
+        String sql = "SELECT DISTINCT SF_TRACK_AND_STRAND FROM SCHOOL_FORM WHERE SF_TRACK_AND_STRAND IS NOT NULL AND SF_TRACK_AND_STRAND != '' AND SF_TRACK_AND_STRAND != 'N/A' ORDER BY SF_TRACK_AND_STRAND ASC";
+        try (Connection conn = DBConnection.getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) trackStrands.add(rs.getString("SF_TRACK_AND_STRAND"));
+        } catch (SQLException e) { e.printStackTrace(); JOptionPane.showMessageDialog(null, "Error fetching tracks/strands: " + e.getMessage(), "Database Error", JOptionPane.ERROR_MESSAGE); }
+        return trackStrands;
     }
 
     public int[] getMinMaxAge() {
-        if (allStudents.isEmpty()) {
-            return new int[]{12, 22}; // Default if no students, reasonable for high school
-        }
-        int minAge = allStudents.stream().mapToInt(Student::getAge).min().orElse(12);
-        int maxAge = allStudents.stream().mapToInt(Student::getAge).max().orElse(22);
-        return new int[]{minAge, maxAge};
+        String sql = "SELECT MIN(STUDENT_AGE), MAX(STUDENT_AGE) FROM STUDENT";
+        try (Connection conn = DBConnection.getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            if (rs.next()) {
+                int minAge = rs.getInt(1); int maxAge = rs.getInt(2);
+                // Provide sensible defaults if DB values are 0
+                return new int[]{minAge == 0 ? 12 : minAge, maxAge == 0 ? 22 : maxAge};
+            }
+        } catch (SQLException e) { e.printStackTrace(); JOptionPane.showMessageDialog(null, "Error fetching min/max age: " + e.getMessage(), "Database Error", JOptionPane.ERROR_MESSAGE); }
+        return new int[]{12, 22}; // Default fallback
     }
 }
 
 /**
  * FilterDialog Class
- * Dialog for setting advanced filter criteria using MigLayout.
+ * Provides a dialog for users to set advanced filter criteria.
  */
 class FilterDialog extends JDialog {
-    private final FilterCriteria currentFilterCriteria; // This is the reference from StudentApp
+    private final FilterCriteria currentFilterCriteria; // The criteria object to modify
     private final DatabaseManager dbManager;
-
     private JTextField firstNameField, lastNameField, middleNameField;
     private JCheckBox middleInitialOnlyCheckBox;
-    private JComboBox<String> gradeLevelComboBox;
-    private JComboBox<String> trackStrandComboBox;
+    private JComboBox<String> gradeLevelComboBox, sectionComboBox, trackStrandComboBox;
     private JCheckBox maleCheckBox, femaleCheckBox;
     private JSpinner minAgeSpinner, maxAgeSpinner;
-
-    private final int initialDbMinAge;
-    private final int initialDbMaxAge;
-
+    private int initialDbMinAge, initialDbMaxAge; // Store initial DB min/max ages for reset
     private boolean filtersApplied = false;
 
     public FilterDialog(Frame owner, FilterCriteria criteriaToModify, DatabaseManager dbManager) {
-        super(owner, "Filter Students", true);
-        this.currentFilterCriteria = criteriaToModify; // Directly modify the shared criteria object
+        super(owner, "Advanced Student Filters", true);
+        this.currentFilterCriteria = criteriaToModify;
         this.dbManager = dbManager;
 
-        int[] ages = dbManager.getMinMaxAge();
-        initialDbMinAge = ages[0];
-        initialDbMaxAge = ages[1];
+        // Fetch initial min/max ages from DB for spinner defaults and reset functionality
+        int[] dbAges = dbManager.getMinMaxAge();
+        initialDbMinAge = dbAges[0];
+        initialDbMaxAge = dbAges[1];
 
         initComponents();
+        loadCriteria(currentFilterCriteria); // Load existing criteria into dialog fields
         pack();
+        setMinimumSize(new Dimension(500, getHeight())); // Adjusted width
         setLocationRelativeTo(owner);
-        // After packing, set a minimum size if needed
-        setMinimumSize(new Dimension(450, getHeight()));
     }
 
     private void initComponents() {
-        // Layout: "insets 10, fillx" - 10px padding around, components fill horizontally by default
-        // Columns: "[right]para[grow,fill]" - First column for labels (right-aligned), paragraph gap, second column for fields (grows and fills)
-        // Rows: multiple rows with default gaps, last row for buttons
-        setLayout(new MigLayout("insets 10, fillx", "[right]para[grow,fill]", ""));
+        setLayout(new MigLayout("insets dialog, fillx, wrap 2", "[right]para[grow,fill]", ""));
 
-        // Name Filters
-        add(new JLabel("Filter by Name:"), "span 2, wrap unrel"); // span 2 columns, wrap to next line with unrelated gap
+        // Name Filtering Section
+        JPanel namePanel = new JPanel(new MigLayout("insets 0, fillx, wrap 2", "[right]para[grow,fill]", ""));
+        namePanel.setBorder(new TitledBorder("Filter by Name"));
+        namePanel.add(new JLabel("First Name:")); firstNameField = new JTextField(); namePanel.add(firstNameField, "growx");
+        namePanel.add(new JLabel("Last Name:")); lastNameField = new JTextField(); namePanel.add(lastNameField, "growx");
+        namePanel.add(new JLabel("Middle Name:")); middleNameField = new JTextField(); namePanel.add(middleNameField, "split 2, growx");
+        middleInitialOnlyCheckBox = new JCheckBox("Initial Only"); namePanel.add(middleInitialOnlyCheckBox, "gapleft 5");
+        add(namePanel, "span 2, growx, wrap unrel");
 
-        add(new JLabel("First Name:"), "gapbottom 5"); // small gap below label
-        firstNameField = new JTextField();
-        add(firstNameField, "wrap"); // wrap to next line
+        // Academic Filtering Section
+        JPanel academicPanel = new JPanel(new MigLayout("insets 0, fillx, wrap 2", "[right]para[grow,fill]", ""));
+        academicPanel.setBorder(new TitledBorder("Filter by Academics"));
+        DefaultComboBoxModel<String> gradeModel = new DefaultComboBoxModel<>(); gradeModel.addElement("All"); dbManager.getDistinctGradeLevels().forEach(gradeModel::addElement);
+        gradeLevelComboBox = new JComboBox<>(gradeModel); academicPanel.add(new JLabel("Grade Level:")); academicPanel.add(gradeLevelComboBox, "growx");
 
-        add(new JLabel("Last Name:"), "gapbottom 5");
-        lastNameField = new JTextField();
-        add(lastNameField, "wrap");
+        DefaultComboBoxModel<String> sectionModel = new DefaultComboBoxModel<>(); sectionModel.addElement("All"); dbManager.getDistinctSections().forEach(sectionModel::addElement);
+        sectionComboBox = new JComboBox<>(sectionModel); academicPanel.add(new JLabel("Section:")); academicPanel.add(sectionComboBox, "growx");
 
-        add(new JLabel("Middle Name:"), "gapbottom 5");
-        middleNameField = new JTextField();
-        add(middleNameField, "split 2"); // split the cell for this and checkbox
-        middleInitialOnlyCheckBox = new JCheckBox("Initial Only");
-        add(middleInitialOnlyCheckBox, "gapleft 5, wrap"); // small gap to its left, then wrap
+        DefaultComboBoxModel<String> trackStrandModel = new DefaultComboBoxModel<>(); trackStrandModel.addElement("All"); dbManager.getDistinctTrackStrands().forEach(trackStrandModel::addElement);
+        trackStrandComboBox = new JComboBox<>(trackStrandModel); academicPanel.add(new JLabel("Track & Strand:")); academicPanel.add(trackStrandComboBox, "growx");
+        add(academicPanel, "span 2, growx, wrap unrel");
 
-        // Grade Level Filter
-        add(new JLabel("Grade Level:"), "gapbottom 5");
-        DefaultComboBoxModel<String> gradeModel = new DefaultComboBoxModel<>();
-        gradeModel.addElement("All");
-        dbManager.getDistinctGradeLevels().forEach(gradeModel::addElement);
-        gradeLevelComboBox = new JComboBox<>(gradeModel);
-        add(gradeLevelComboBox, "wrap");
+        // Demographics Filtering Section
+        JPanel demoPanel = new JPanel(new MigLayout("insets 0, fillx, wrap 2", "[right]para[grow,fill]", ""));
+        demoPanel.setBorder(new TitledBorder("Filter by Demographics"));
+        maleCheckBox = new JCheckBox("Male"); femaleCheckBox = new JCheckBox("Female");
+        JPanel sexPanel = new JPanel(new MigLayout("insets 0, gap 0", "[]10[]", "[]")); // Layout for sex checkboxes
+        sexPanel.add(maleCheckBox); sexPanel.add(femaleCheckBox);
+        demoPanel.add(new JLabel("Sex:")); demoPanel.add(sexPanel, "growx");
 
-        // Track & Strand Filter
-        add(new JLabel("Track & Strand:"), "gapbottom 5");
-        DefaultComboBoxModel<String> trackStrandModel = new DefaultComboBoxModel<>();
-        trackStrandModel.addElement("All");
-        dbManager.getDistinctTrackStrands().forEach(trackStrandModel::addElement);
-        trackStrandComboBox = new JComboBox<>(trackStrandModel);
-        add(trackStrandComboBox, "wrap");
+        // Age Spinners
+        // Use initialDbMinAge and initialDbMaxAge for spinner bounds
+        SpinnerNumberModel minModel = new SpinnerNumberModel(initialDbMinAge, initialDbMinAge, Math.max(initialDbMinAge, initialDbMaxAge + 20), 1);
+        minAgeSpinner = new JSpinner(minModel);
+        SpinnerNumberModel maxModel = new SpinnerNumberModel(Math.min(initialDbMaxAge + 5, initialDbMaxAge + 20), initialDbMinAge, Math.max(initialDbMinAge, initialDbMaxAge + 20), 1);
+        maxAgeSpinner = new JSpinner(maxModel);
 
-        // Sex Filter
-        add(new JLabel("Sex:"), "gapbottom 5");
-        maleCheckBox = new JCheckBox("Male");
-        femaleCheckBox = new JCheckBox("Female");
-        // Using a panel for checkboxes to keep them together, then adding the panel
-        JPanel sexPanel = new JPanel(new MigLayout("insets 0, gap 0")); // No insets for this inner panel
-        sexPanel.add(maleCheckBox);
-        sexPanel.add(femaleCheckBox, "gapleft 10"); // Gap between checkboxes
-        add(sexPanel, "wrap");
+        JPanel agePanel = new JPanel(new MigLayout("insets 0, fillx", "[][grow,fill][][]", ""));
+        agePanel.add(new JLabel("Min:")); agePanel.add(minAgeSpinner, "w 60!");
+        agePanel.add(new JLabel("Max:"), "gapleft 15"); agePanel.add(maxAgeSpinner, "w 60!");
+        demoPanel.add(new JLabel("Age Range:")); demoPanel.add(agePanel, "growx");
+        add(demoPanel, "span 2, growx, wrap unrel");
 
+        // Action Buttons
+        JButton applyButton = new JButton("Apply Filters"); applyButton.addActionListener(e -> applyFilters());
+        JButton clearButton = new JButton("Clear Filters"); clearButton.addActionListener(e -> clearFiltersAndApply());
+        JButton cancelButton = new JButton("Cancel"); cancelButton.addActionListener(e -> { filtersApplied = false; setVisible(false); dispose(); });
 
-        // Age Range Filter
-        add(new JLabel("Age Range:"), "gapbottom 5");
-        minAgeSpinner = new JSpinner(new SpinnerNumberModel(initialDbMinAge, initialDbMinAge, initialDbMaxAge + 20, 1)); // Increased upper bound for spinner model
-        maxAgeSpinner = new JSpinner(new SpinnerNumberModel(initialDbMaxAge + 5, initialDbMinAge, initialDbMaxAge + 20, 1));
-        // Panel for age spinners
-        JPanel agePanel = new JPanel(new MigLayout("insets 0, fillx", "[][grow,fill][][]", "")); // Layout for Min: [spinner] Max: [spinner]
-        agePanel.add(new JLabel("Min:"));
-        agePanel.add(minAgeSpinner, "w 60!"); // Set preferred width for spinner
-        agePanel.add(new JLabel("Max:"), "gapleft 15");
-        agePanel.add(maxAgeSpinner, "w 60!, wrap"); // Set preferred width and wrap
-        add(agePanel, "span 2, growx, wrap unrel"); // Span both columns, grow horizontally, unrelated gap
-
-
-        // Load initial criteria
-        loadCriteria(currentFilterCriteria);
-
-        // Buttons Panel
-        JButton applyButton = new JButton("Apply Filters");
-        applyButton.addActionListener(e -> applyFilters());
-        JButton clearButton = new JButton("Clear Filters");
-        clearButton.addActionListener(e -> clearFiltersAndApply());
-        JButton cancelButton = new JButton("Cancel");
-        cancelButton.addActionListener(e -> { filtersApplied = false; setVisible(false); dispose(); });
-
-        // Add buttons to a panel with MigLayout for right alignment
-        JPanel buttonPanel = new JPanel(new MigLayout("insets 0, align right"));
+        JPanel buttonPanel = new JPanel(new MigLayout("insets 0, align right")); // Align buttons to the right
         buttonPanel.add(applyButton);
         buttonPanel.add(clearButton, "gapleft 5");
         buttonPanel.add(cancelButton, "gapleft 5");
-
-        add(buttonPanel, "span 2, align right, gaptop 15"); // span 2 columns, align right, gap above
+        add(buttonPanel, "span 2, align right, gaptop 15");
     }
 
+    /**
+     * Loads the current filter criteria into the dialog's input fields.
+     * @param criteria The FilterCriteria object to load from.
+     */
     private void loadCriteria(FilterCriteria criteria) {
         firstNameField.setText(criteria.filterFirstName);
         lastNameField.setText(criteria.filterLastName);
         middleNameField.setText(criteria.filterMiddleName);
         middleInitialOnlyCheckBox.setSelected(criteria.middleInitialOnly);
+
         gradeLevelComboBox.setSelectedItem(criteria.filterGradeLevel);
+        sectionComboBox.setSelectedItem(criteria.filterSection);
 
-        // Corrected line for trackStrandComboBox:
-        if (criteria.filterTrackStrand == null || 
-            ((DefaultComboBoxModel<String>)trackStrandComboBox.getModel()).getIndexOf(criteria.filterTrackStrand) != -1) {
-             trackStrandComboBox.setSelectedItem(criteria.filterTrackStrand);
+        // Handle trackStrandComboBox item existence
+        if (criteria.filterTrackStrand == null || ((DefaultComboBoxModel<String>)trackStrandComboBox.getModel()).getIndexOf(criteria.filterTrackStrand) == -1) {
+             trackStrandComboBox.setSelectedItem("All");
         } else {
-            trackStrandComboBox.setSelectedItem("All"); // Default if previous selection not found
+            trackStrandComboBox.setSelectedItem(criteria.filterTrackStrand);
         }
-
 
         maleCheckBox.setSelected(criteria.filterMale);
         femaleCheckBox.setSelected(criteria.filterFemale);
 
-        // Ensure spinner values are within their model's actual bounds after model creation
+        // Safely set spinner values within their model's bounds
         SpinnerNumberModel minModel = (SpinnerNumberModel) minAgeSpinner.getModel();
-        minModel.setMinimum(initialDbMinAge); // Set actual min from data
         minAgeSpinner.setValue(Math.max((Integer)minModel.getMinimum(), Math.min(criteria.minAge, (Integer)minModel.getMaximum())));
 
-
         SpinnerNumberModel maxModel = (SpinnerNumberModel) maxAgeSpinner.getModel();
-        maxModel.setMaximum(initialDbMaxAge + 20); // Set actual max from data + buffer
         maxAgeSpinner.setValue(Math.min((Integer)maxModel.getMaximum(), Math.max(criteria.maxAge, (Integer)maxModel.getMinimum())));
     }
 
+    /**
+     * Applies the filters set in the dialog to the currentFilterCriteria object.
+     */
     private void applyFilters() {
         currentFilterCriteria.filterFirstName = firstNameField.getText().trim();
         currentFilterCriteria.filterLastName = lastNameField.getText().trim();
         currentFilterCriteria.filterMiddleName = middleNameField.getText().trim();
         currentFilterCriteria.middleInitialOnly = middleInitialOnlyCheckBox.isSelected();
         currentFilterCriteria.filterGradeLevel = (String) gradeLevelComboBox.getSelectedItem();
+        currentFilterCriteria.filterSection = (String) sectionComboBox.getSelectedItem();
         currentFilterCriteria.filterTrackStrand = (String) trackStrandComboBox.getSelectedItem();
         currentFilterCriteria.filterMale = maleCheckBox.isSelected();
         currentFilterCriteria.filterFemale = femaleCheckBox.isSelected();
@@ -569,276 +604,367 @@ class FilterDialog extends JDialog {
 
         filtersApplied = true;
         setVisible(false);
-        dispose(); // Important to release resources
+        dispose();
     }
 
+    /**
+     * Clears all filter fields in the dialog and applies these cleared filters.
+     */
     private void clearFiltersAndApply() {
-        // Reset fields in the dialog
-        firstNameField.setText("");
-        lastNameField.setText("");
-        middleNameField.setText("");
+        // Reset UI fields
+        firstNameField.setText(""); lastNameField.setText(""); middleNameField.setText("");
         middleInitialOnlyCheckBox.setSelected(false);
         gradeLevelComboBox.setSelectedItem("All");
+        sectionComboBox.setSelectedItem("All");
         trackStrandComboBox.setSelectedItem("All");
-        maleCheckBox.setSelected(true);
-        femaleCheckBox.setSelected(true);
-        minAgeSpinner.setValue(initialDbMinAge);
-        maxAgeSpinner.setValue(initialDbMaxAge + 5); // Default max for filter
+        maleCheckBox.setSelected(true); femaleCheckBox.setSelected(true);
+        minAgeSpinner.setValue(initialDbMinAge); // Reset to initial DB min age
+        maxAgeSpinner.setValue(initialDbMaxAge > initialDbMinAge ? initialDbMaxAge + 5 : initialDbMinAge + 20); // Reset to default max age logic
 
-        // Update the shared FilterCriteria object
-        currentFilterCriteria.filterFirstName = "";
-        currentFilterCriteria.filterLastName = "";
-        currentFilterCriteria.filterMiddleName = "";
-        currentFilterCriteria.middleInitialOnly = false;
-        currentFilterCriteria.filterGradeLevel = "All";
-        currentFilterCriteria.filterTrackStrand = "All";
-        currentFilterCriteria.filterMale = true;
-        currentFilterCriteria.filterFemale = true;
-        currentFilterCriteria.minAge = initialDbMinAge;
-        currentFilterCriteria.maxAge = initialDbMaxAge + 5;
+        // Reset the underlying FilterCriteria object
+        currentFilterCriteria.reset(initialDbMinAge, initialDbMaxAge);
 
-        filtersApplied = true; // Indicate that filters (even cleared ones) were "applied"
+        filtersApplied = true;
         setVisible(false);
         dispose();
     }
 
-    public boolean wereFiltersApplied() {
-        return filtersApplied;
-    }
-    // No need for getFilterCriteria() as we are modifying the passed-in object directly
+    /**
+     * Checks if the filters were applied by the user (i.e., "Apply" or "Clear" was clicked).
+     * @return True if filters were applied, false otherwise (e.g., dialog was cancelled).
+     */
+    public boolean wereFiltersApplied() { return filtersApplied; }
 }
 
 
 /**
  * StudentApp Class
- * Main application class using MigLayout and FlatLaf.
+ * Main application window for viewing and filtering student data.
  */
 public class StudentApp extends JFrame {
     private final DatabaseManager dbManager;
-    private StudentTableModel tableModel;
-    private JTable studentTable;
-    private final FilterCriteria currentFilters; // Shared filter object
+    private GTable studentTable;
+    private final FilterCriteria currentFilters;
+    private List<Student> currentStudentList; // Holds the currently displayed list of students
 
-    private int currentPage = 1;
-    private final int pageSize = 25; // Students per page
-    private int totalPages = 1;
+    private int currentPageSize = 25; // Default page size
+    private final Integer[] availablePageSizes = {10, 25, 50, 100, 250};
 
-    private JLabel pageInfoLabel;
-    private JButton prevButton, nextButton;
     private JTextField searchField;
     private JLabel appliedFiltersLabel;
+    private JComboBox<Integer> pageSizeComboBox;
+    private JButton printSelectedButton; // New button
+
+
+    private int dbMinAge, dbMaxAge; // Store min/max age from DB for filter label
 
     public StudentApp() {
         dbManager = new DatabaseManager();
         currentFilters = new FilterCriteria();
-        int[] ages = dbManager.getMinMaxAge();
-        currentFilters.minAge = ages[0]; // Initialize with actual data min
-        currentFilters.maxAge = ages[1] + 5; // And actual data max + buffer
+        currentStudentList = new ArrayList<>();
+
+        // Initialize min/max ages from DB
+        int[] dbAges = dbManager.getMinMaxAge();
+        dbMinAge = dbAges[0];
+        dbMaxAge = dbAges[1];
+        currentFilters.minAge = dbMinAge;
+        currentFilters.maxAge = dbMaxAge > dbMinAge ? dbMaxAge + 5 : dbMinAge + 20;
+
 
         setTitle("Student List Viewer");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        // Size will be set by pack() or specific dimensions later
-        setLocationRelativeTo(null);
 
         initComponents();
         loadData();
-        pack(); // Pack after components are added
-        setMinimumSize(new Dimension(800, 600)); // Set a reasonable minimum size
-        setLocationRelativeTo(null); // Center again after pack
+        pack();
+        setMinimumSize(new Dimension(1024, 768));
+        setLocationRelativeTo(null);
     }
 
     private void initComponents() {
-        // Main panel with MigLayout
-        // Layout: "insets dialog, fill" - standard dialog insets, components fill available space
-        // Columns: "[grow,fill]" - one column that grows and fills
-        // Rows: "[]para[]para[grow,fill]para[]" - rows for top controls, table (grows), and bottom controls, with paragraph gaps
-        JPanel mainPanel = new JPanel(new MigLayout("insets dialog, fill", "[grow,fill]", "[]para[]para[grow,fill]para[]"));
-        mainPanel.setBorder(new EmptyBorder(5,5,5,5)); // Keep some outer padding if desired
+        JPanel mainPanel = new JPanel(new MigLayout("insets dialog, fill", "[grow,fill]", "[][grow,fill][]"));
+        mainPanel.setBorder(new EmptyBorder(10,10,10,10)); // Increased padding
 
-        // --- Top Panel for Search and Filters ---
-        // Using MigLayout for the top panel as well for finer control
-        // "insets 0" - no extra padding inside this panel
-        // Columns: multiple, for label, field, buttons, and label
-        // Rows: single row
-        JPanel topPanel = new JPanel(new MigLayout("insets 0, fillx",
-                "[][grow,fill]para[]para[]para[right]", // label, search field, search btn, filter btn, applied filters label
-                "[]")); // Single row
-
-        topPanel.add(new JLabel("Search Name:"));
+        // --- Top Panel for Search, Filters, and Page Size ---
+        JPanel topPanel = new JPanel(new MigLayout("insets 0, fillx", "[][grow,fill]para[]para[]para[right]para[]para[]", "[]")); // Added one more para[] for the new button
+        topPanel.add(new JLabel("Search LRN/Name:"));
         searchField = new JTextField();
-        topPanel.add(searchField, "growx"); // Search field grows horizontally
+        searchField.putClientProperty("JTextField.placeholderText", "Enter LRN or any part of name...");
+        topPanel.add(searchField, "growx");
 
         JButton searchButton = new JButton("Search");
+        searchButton.setToolTipText("Apply search term");
         searchButton.addActionListener(e -> {
-            currentFilters.searchNameTerm = searchField.getText().trim();
-            currentPage = 1;
+            currentFilters.searchTerm = searchField.getText().trim();
+            // Reset detailed name filters if a general search term is used
+            currentFilters.filterFirstName = "";
+            currentFilters.filterLastName = "";
+            currentFilters.filterMiddleName = "";
             loadData();
         });
         topPanel.add(searchButton);
 
         JButton filterButton = new JButton("Advanced Filters...");
+        filterButton.setToolTipText("Open advanced filter options");
         filterButton.addActionListener(e -> openFilterDialog());
         topPanel.add(filterButton);
+        
+        // New "Print Selected" button
+        printSelectedButton = new JButton("Print Selected");
+        printSelectedButton.setToolTipText("Print LRN and Name of selected students");
+        printSelectedButton.addActionListener(e -> printSelectedStudents());
+        topPanel.add(printSelectedButton, "gapleft 10"); // Add some gap
 
-        appliedFiltersLabel = new JLabel("Filters: 0");
-        topPanel.add(appliedFiltersLabel, "gapleft push"); // push to the right
+        appliedFiltersLabel = new JLabel("Filters: 0 | Total: 0");
+        topPanel.add(appliedFiltersLabel, "gapleft push");
 
-        mainPanel.add(topPanel, "wrap"); // Add topPanel to mainPanel and wrap to next row
+        pageSizeComboBox = new JComboBox<>(availablePageSizes);
+        pageSizeComboBox.setSelectedItem(currentPageSize);
+        pageSizeComboBox.setToolTipText("Select records per page");
+        pageSizeComboBox.addItemListener(e -> {
+            if (e.getStateChange() == ItemEvent.SELECTED) {
+                JComboBox<?> sourceComboBox = (JComboBox<?>) e.getSource();
+                currentPageSize = (Integer) sourceComboBox.getSelectedItem();
+                studentTable.setPaginationEnabled(true, currentPageSize);
+                loadData(); 
+            }
+        });
+        topPanel.add(new JLabel("Rows:"), "gapleft 10");
+        topPanel.add(pageSizeComboBox);
 
-        // --- Center Panel: Table ---
-        tableModel = new StudentTableModel(new ArrayList<>());
-        studentTable = new JTable(tableModel);
-        studentTable.setAutoCreateRowSorter(false);
-        studentTable.setFillsViewportHeight(true);
-        studentTable.setRowHeight(25); // Or use UIManager.getInt("Table.rowHeight") for L&F consistency
-        // studentTable.setIntercellSpacing(new Dimension(0, 0)); // FlatLaf might handle this well
+        mainPanel.add(topPanel, "wrap");
 
-        // Column widths
-        studentTable.getColumnModel().getColumn(0).setPreferredWidth(110); // LRN
-        studentTable.getColumnModel().getColumn(1).setPreferredWidth(130); // Last Name
-        studentTable.getColumnModel().getColumn(2).setPreferredWidth(130); // First Name
-        studentTable.getColumnModel().getColumn(3).setPreferredWidth(100); // Middle
-        studentTable.getColumnModel().getColumn(4).setPreferredWidth(60);  // Sex
-        studentTable.getColumnModel().getColumn(5).setPreferredWidth(40);  // Age
-        studentTable.getColumnModel().getColumn(6).setPreferredWidth(90);  // Grade
-        studentTable.getColumnModel().getColumn(7).setPreferredWidth(70);  // Section
-        studentTable.getColumnModel().getColumn(8).setPreferredWidth(150); // Track
+        // --- GTable Setup ---
+        // Added "Select" column for checkbox
+        String[] columnNames = {"Select", "LRN", "Name", "Sex", "Age", "Grade", "Section", "Track/Strand", "Actions"};
+        Class<?>[] columnTypes = {Boolean.class, String.class, String.class, String.class, Integer.class, String.class, String.class, String.class, Object.class};
+        boolean[] editableColumns = {true, false, false, false, false, false, false, false, true}; // Checkbox is editable
 
-        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
-        centerRenderer.setHorizontalAlignment(JLabel.CENTER);
-        studentTable.getColumnModel().getColumn(4).setCellRenderer(centerRenderer); // Sex
-        studentTable.getColumnModel().getColumn(5).setCellRenderer(centerRenderer); // Age
+        // Adjusted column width proportions for the new "Select" column
+        double[] columnWidthProportions = {0.05, 0.12, 0.20, 0.05, 0.05, 0.08, 0.10, 0.15, 0.15}; // Sum should be close to 1.0 if actions column is flexible
+
+        int[] alignments = {
+            SwingConstants.CENTER, // Select (Checkbox)
+            SwingConstants.LEFT, SwingConstants.LEFT, SwingConstants.CENTER, SwingConstants.CENTER,
+            SwingConstants.LEFT, SwingConstants.LEFT, SwingConstants.LEFT, SwingConstants.CENTER
+        };
+
+        // --- Action Manager Setup ---
+        DefaultTableActionManager actionManager = new DefaultTableActionManager();
+        actionManager.addAction("View", (table, row) -> {
+            // LRN is now at index 1 because of the checkbox column at index 0
+            String lrn = (String) studentTable.getModel().getValueAt(row, 1); 
+            Student student = findStudentByLrn(lrn); // findStudentByLrn needs to be aware of currentStudentList content
+            if (student != null) {
+                displayStudentDetails(student);
+            } else {
+                 JOptionPane.showMessageDialog(StudentApp.this,"Could not find student details for LRN: " + lrn, "Error", JOptionPane.ERROR_MESSAGE);
+            }
+        }, new Color(0, 123, 255), null); 
+
+        actionManager.addAction("Edit", (table, row) -> {
+            String lrn = (String) studentTable.getModel().getValueAt(row, 1); // LRN is at index 1
+            JOptionPane.showMessageDialog(StudentApp.this, "Edit action for LRN: " + lrn + "\n(Not implemented yet)", "Edit Student", JOptionPane.INFORMATION_MESSAGE);
+        }, new Color(255, 193, 7), null);
+
+
+        studentTable = new GTable(new Object[][]{}, columnNames, columnTypes, editableColumns, columnWidthProportions, alignments, true, actionManager); // Set includeCheckbox to true
+        studentTable.setPaginationEnabled(true, currentPageSize);
 
         JScrollPane scrollPane = new JScrollPane(studentTable);
-        mainPanel.add(scrollPane, "grow, wrap"); // Table scroll pane grows and fills, then wrap
+        mainPanel.add(scrollPane, "grow, wrap");
+        mainPanel.add(studentTable.getPaginationPanel(), "dock south, align center");
 
-        // --- Bottom Panel: Pagination ---
-        // Using MigLayout for pagination as well
-        // "insets 0, center" - no padding, components centered
-        JPanel bottomPanel = new JPanel(new MigLayout("insets 0, center"));
-        prevButton = new JButton("<< Previous");
-        prevButton.addActionListener(e -> {
-            if (currentPage > 1) {
-                currentPage--;
-                loadData();
-            }
-        });
-        bottomPanel.add(prevButton);
-
-        pageInfoLabel = new JLabel("Page 1 of 1");
-        bottomPanel.add(pageInfoLabel, "gapx 15"); // Horizontal gap around page info
-
-        nextButton = new JButton("Next >>");
-        nextButton.addActionListener(e -> {
-            if (currentPage < totalPages) {
-                currentPage++;
-                loadData();
-            }
-        });
-        bottomPanel.add(nextButton, "gapx 15");
-
-        mainPanel.add(bottomPanel, "align center"); // Add bottomPanel, align it center
-
-        setContentPane(mainPanel); // Set the main MigLayout panel as the content pane
+        setContentPane(mainPanel);
     }
-
-    private void loadData() {
-        List<Student> studentsForPage = dbManager.getStudents(currentPage, pageSize, currentFilters);
-        tableModel.setData(studentsForPage);
-
-        int totalFilteredStudents = dbManager.getTotalStudentCount(currentFilters);
-        totalPages = (int) Math.ceil((double) totalFilteredStudents / pageSize);
-        if (totalPages == 0) totalPages = 1;
-
-        if (currentPage > totalPages && totalPages > 0) {
-            currentPage = totalPages;
-            studentsForPage = dbManager.getStudents(currentPage, pageSize, currentFilters); // Reload
-            tableModel.setData(studentsForPage);
-        } else if (totalFilteredStudents == 0 && currentPage != 1) {
-             currentPage = 1; // Reset to page 1 if no results and not already on page 1
+    
+    /**
+     * Action handler for the "Print Selected" button.
+     * Iterates through the table, finds selected students, and prints their LRN and Name.
+     */
+    private void printSelectedStudents() {
+        StringBuilder selectedStudentsInfo = new StringBuilder("Selected Students:\n");
+        boolean anySelected = false;
+        // GTable paginates data, so getRowCount() gives rows on the current page.
+        // If you need to get all selected items across all pages, GTable would need a method for that,
+        // or you'd manage selections against the full currentStudentList.
+        // For this implementation, we process the current view of the table.
+        for (int i = 0; i < studentTable.getRowCount(); i++) {
+            Boolean isSelected = (Boolean) studentTable.getValueAt(i, 0); // Checkbox is at column 0
+            if (isSelected != null && isSelected) {
+                anySelected = true;
+                String lrn = (String) studentTable.getValueAt(i, 1);    // LRN is at column 1
+                String name = (String) studentTable.getValueAt(i, 2);   // Name is at column 2
+                selectedStudentsInfo.append("LRN: ").append(lrn).append(", Name: ").append(name).append("\n");
+            }
         }
 
-        updatePaginationControls();
+        if (anySelected) {
+            System.out.println(selectedStudentsInfo.toString()); // Print to console
+            // You can also display this in a JOptionPane or a JTextArea in a dialog
+            JTextArea textArea = new JTextArea(selectedStudentsInfo.toString());
+            textArea.setEditable(false);
+            JScrollPane scrollPane = new JScrollPane(textArea);
+            scrollPane.setPreferredSize(new Dimension(400, 300));
+            JOptionPane.showMessageDialog(this, scrollPane, "Selected Student Details", JOptionPane.INFORMATION_MESSAGE);
+        } else {
+            JOptionPane.showMessageDialog(this, "No students selected.", "Print Selected", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }
+
+
+    /**
+     * Finds a student in the currentStudentList by their LRN.
+     * This list (currentStudentList) holds all students matching the current filter,
+     * not just the ones on the current page of GTable.
+     * @param lrn The LRN to search for.
+     * @return The Student object if found, null otherwise.
+     */
+    private Student findStudentByLrn(String lrn) {
+        if (lrn == null) return null;
+        for (Student student : currentStudentList) { // Search the master list
+            if (lrn.equals(student.getLrn())) {
+                return student;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Loads data from the database based on current filters and updates the GTable.
+     */
+    private void loadData() {
+        // Fetch ALL students matching the current filters. GTable will handle pagination.
+        currentStudentList = dbManager.getStudents(1, Integer.MAX_VALUE, currentFilters);
+
+        // The number of columns in dataForGTable must match studentTable.getColumnCount()
+        // which is now 9 (Select, LRN, Name, Sex, Age, Grade, Section, Track/Strand, Actions)
+        Object[][] dataForGTable = new Object[currentStudentList.size()][studentTable.getColumnCount()];
+        for (int i = 0; i < currentStudentList.size(); i++) {
+            Student s = currentStudentList.get(i);
+            dataForGTable[i] = new Object[]{
+                Boolean.FALSE, // For the "Select" checkbox column
+                s.getLrn(), 
+                s.getFullName(), 
+                s.getSex(), 
+                s.getAge(),
+                s.getGradeLevel(), 
+                s.getSection(), 
+                s.getTrackAndStrand(),
+                "" // Placeholder for actions column, GTable's ActionManager handles rendering
+            };
+        }
+        studentTable.setData(dataForGTable); // This will internally handle pagination display
         updateAppliedFiltersLabel();
     }
 
-    private void updatePaginationControls() {
-        pageInfoLabel.setText("Page " + currentPage + " of " + totalPages + " (Total: " + dbManager.getTotalStudentCount(currentFilters) + ")");
-        prevButton.setEnabled(currentPage > 1);
-        nextButton.setEnabled(currentPage < totalPages);
-    }
-
+    /**
+     * Updates the label displaying the count of active filters and total records.
+     */
     private void updateAppliedFiltersLabel() {
-        int count = 0;
-        // Check general search term
-        if (currentFilters.searchNameTerm != null && !currentFilters.searchNameTerm.isEmpty()) count++;
+        int filterCount = currentFilters.getActiveFilterCount(dbMinAge, dbMaxAge);
+        int totalRecords = currentStudentList.size(); // Total records matching filter, before GTable pagination
 
-        // Check detailed name filters
-        if (currentFilters.filterFirstName != null && !currentFilters.filterFirstName.isEmpty()) count++;
-        if (currentFilters.filterLastName != null && !currentFilters.filterLastName.isEmpty()) count++;
-        if (currentFilters.filterMiddleName != null && !currentFilters.filterMiddleName.isEmpty()) count++;
-        // Note: middleInitialOnly is a modifier, not a separate filter count item unless middleName is also set.
+        String filterText = filterCount == 1 ? "1 Active Filter" : filterCount + " Active Filters";
+        String recordText = totalRecords == 1 ? "1 Record Found" : totalRecords + " Records Found";
 
-        // Check dropdown filters
-        if (!"All".equals(currentFilters.filterGradeLevel)) count++;
-        if (!"All".equals(currentFilters.filterTrackStrand)) count++;
-
-        // Check sex filter (counts as 1 if not both selected)
-        if (!currentFilters.filterMale || !currentFilters.filterFemale) { // If at least one is unchecked
-            if (currentFilters.filterMale != currentFilters.filterFemale) { // And they are different (i.e., one selected, not none)
-                count++;
-            }
+        if (filterCount == 0 && (currentFilters.searchTerm == null || currentFilters.searchTerm.isEmpty())) {
+            appliedFiltersLabel.setText("Showing All Records: " + recordText);
+        } else if (filterCount == 0 && currentFilters.searchTerm != null && !currentFilters.searchTerm.isEmpty()){
+             appliedFiltersLabel.setText("Search Active | " + recordText);
         }
-        // If both male and female are false, it's a restrictive filter, but the logic above handles it.
-        // If user unchecks both, it means "show no one by sex", which is a filter.
-        // However, the current UI for FilterDialog defaults them to true and doesn't easily allow unchecking both to mean "no sex filter".
-        // The current count logic is: if only one is selected, it's a filter. If both, no filter. If none (hypothetically), it's a filter.
-
-        // Check age filter
-        int[] dbAges = dbManager.getMinMaxAge(); // Get current min/max from data for comparison
-        boolean minAgeDefault = currentFilters.minAge == dbAges[0];
-        boolean maxAgeDefault = currentFilters.maxAge == (dbAges[1] + 5); // Compare with the default max used in FilterCriteria reset
-
-        if (!minAgeDefault || !maxAgeDefault) {
-            count++;
+        else {
+            appliedFiltersLabel.setText(filterText + " | " + recordText);
         }
-        appliedFiltersLabel.setText("Filters: " + count);
     }
 
-
+    /**
+     * Opens the advanced filter dialog.
+     */
     private void openFilterDialog() {
-        // Pass the *shared* currentFilters object to the dialog.
-        // The dialog will modify this object directly.
-        FilterDialog dialog = new FilterDialog(this, currentFilters, dbManager);
-        dialog.setVisible(true); // This is a modal dialog, so code execution pauses here
+        searchField.setText(""); 
+        currentFilters.searchTerm = ""; 
 
-        // After the dialog is closed (either by Apply, Clear, or Cancel):
+        FilterDialog dialog = new FilterDialog(this, currentFilters, dbManager);
+        dialog.setVisible(true);
+
         if (dialog.wereFiltersApplied()) {
-            // Filters were changed (or cleared and then "applied")
-            currentPage = 1; // Reset to first page
-            loadData(); // Reload data with the modified currentFilters
+            loadData();
         }
-        // If dialog was cancelled, currentFilters remains as it was before opening.
     }
+
+    /**
+     * Displays student details in a more structured dialog.
+     * @param student The student whose details are to be displayed.
+     */
+    private void displayStudentDetails(Student student) {
+        JPanel detailsPanel = new JPanel(new MigLayout("wrap 2, insets 15", "[right]para[grow,fill]"));
+        detailsPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
+
+        detailsPanel.add(new JLabel("LRN:")); detailsPanel.add(new JLabel(student.getLrn()));
+        detailsPanel.add(new JLabel("Full Name:")); detailsPanel.add(new JLabel(student.getFullName()));
+        detailsPanel.add(new JLabel("Formatted Name:")); detailsPanel.add(new JLabel(student.getFormattedName())); 
+        detailsPanel.add(new JLabel("Sex:")); detailsPanel.add(new JLabel(student.getSex()));
+        detailsPanel.add(new JLabel("Age:")); detailsPanel.add(new JLabel(String.valueOf(student.getAge())));
+        detailsPanel.add(new JLabel("Grade Level:")); detailsPanel.add(new JLabel(student.getGradeLevel()));
+        detailsPanel.add(new JLabel("Section:")); detailsPanel.add(new JLabel(student.getSection()));
+        detailsPanel.add(new JLabel("Track/Strand:"));
+
+        JTextArea trackStrandArea = new JTextArea(student.getTrackAndStrand());
+        trackStrandArea.setEditable(false);
+        trackStrandArea.setLineWrap(true);
+        trackStrandArea.setWrapStyleWord(true);
+        trackStrandArea.setBackground(detailsPanel.getBackground()); 
+        JScrollPane trackScrollPane = new JScrollPane(trackStrandArea);
+        trackScrollPane.setBorder(null); 
+        trackScrollPane.setPreferredSize(new Dimension(250, 40)); 
+        detailsPanel.add(trackScrollPane, "growx");
+
+
+        JOptionPane.showMessageDialog(this, detailsPanel, "Student Details: " + student.getFirstName(), JOptionPane.INFORMATION_MESSAGE);
+    }
+
 
     public static void main(String[] args) {
-        // It's crucial to set FlatLaf before any Swing components are created.
         try {
-            FlatLightLaf.setup(); // Or FlatDarkLaf.setup(), FlatIntelliJLaf.setup(), etc.
-            // For more control: UIManager.setLookAndFeel(new FlatLightLaf());
+            FlatLightLaf.setup();
         } catch (Exception ex) {
             System.err.println("Failed to initialize LaF: " + ex.getMessage());
-            // Fallback to system L&F or cross-platform L&F if FlatLaf fails
             try {
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            } catch (Exception e) { e.printStackTrace(); }
         }
 
         SwingUtilities.invokeLater(() -> {
             StudentApp app = new StudentApp();
             app.setVisible(true);
         });
+    }
+}
+
+class DBConnection {
+	//THIS IS LITERALLY MY DATABASE SETUP NO NEED TO CHANGE IT 
+    private static final String DB_URL = "jdbc:mariadb://localhost:3306/gomisdb";
+    private static final String DB_USER = "root";
+    private static final String DB_PASSWORD = "YourRootPassword123!"; 
+
+    public static Connection getConnection() {
+        Connection connection = null;
+        try {
+            Class.forName("org.mariadb.jdbc.Driver");
+            connection = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
+        } catch (ClassNotFoundException ex) {
+            ex.printStackTrace();
+            JOptionPane.showMessageDialog(null,
+                "MariaDB JDBC Driver not found. Please add it to your project's classpath.",
+                "Driver Error", JOptionPane.ERROR_MESSAGE);
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+            JOptionPane.showMessageDialog(null,
+                "Database Connection Error: " + ex.getMessage() +
+                "\nPlease check your database server (" + DB_URL + ") and credentials.",
+                "DB Connection Error", JOptionPane.ERROR_MESSAGE);
+        }
+        return connection;
     }
 }
